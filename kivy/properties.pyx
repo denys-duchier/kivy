@@ -282,7 +282,7 @@ cdef class Property:
             If set, it will replace an invalid property value (overrides
             errorhandler).
 
-            If the paramters include `force_dispatch`, it should be a boolean.
+            If the parameters include `force_dispatch`, it should be a boolean.
             If True, the property event will be dispatched even if the new
             value matches the old value (by default identical values are not
             dispatched to avoid infinite recursion in two-way binds). Be
