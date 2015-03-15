@@ -1137,8 +1137,8 @@ class WindowBase(EventDispatcher):
                            "semantics.")
 
     def on_textinput(self, text):
-        '''Event called whem text: i.e. alpha numeric non control keys or set of keys
-        is entered. As it is not gaurenteed whether we get one characyer or multiple 
+        '''Event called when text, i.e. alpha numeric non control keys or set of keys,
+        is entered. As it is not guarenteed whether we get one character or multiple 
         characters, this event supports handling multiple characters.
 
         ..versionadded:: 1.9.0
