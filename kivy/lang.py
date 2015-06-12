@@ -820,6 +820,7 @@ lang_str = re.compile('([\'"][^\'"]*[\'"])')
 lang_key = re.compile('([a-zA-Z_]+)')
 lang_keyvalue = re.compile('([a-zA-Z_][a-zA-Z0-9_.]*\.[a-zA-Z0-9_.]+)')
 lang_tr = re.compile('(_\()')
+lang_tilde = re.compile('([0-9]*)~')
 
 # class types to check with isinstance
 if PY2:
@@ -831,7 +832,7 @@ else:
 # widget is deleted
 _handlers = defaultdict(list)
 
-# uid -> propname -> [bound]
+# uid -> propname -> [(prio,[bound])]
 # used to correctly unbind callbacks when one rule's property constraint
 # overrides another
 _constraints = defaultdict(lambda:defaultdict(list))
@@ -937,9 +938,9 @@ class ParserRuleProperty(object):
     '''
 
     __slots__ = ('ctx', 'line', 'name', 'value', 'co_value',
-                 'watched_keys', 'mode', 'count')
+                 'watched_keys', 'mode', 'count', 'prio')
 
-    def __init__(self, ctx, line, name, value):
+    def __init__(self, ctx, line, name, value, prio):
         super(ParserRuleProperty, self).__init__()
         #: Associated parser
         self.ctx = ctx
@@ -957,6 +958,8 @@ class ParserRuleProperty(object):
         self.watched_keys = None
         #: Stats
         self.count = 0
+        #: Priority (None means the rule was not tilded)
+        self.prio = prio
 
     def precompile(self):
         name = self.name
@@ -1393,14 +1396,29 @@ class Parser(object):
 
                 # It's a property
                 else:
+                    prio = None
+                    m = lang_tilde.match(name)
+                    if m:
+                        _prio = m.groupe(1)
+                        prio = int(_prio) if _prio else 0
+                        name = name[m.end(1):]
+                        if not name:
+                            raise ParserException(self, ln,
+                                                  'Property name is missing')
                     if name not in Parser.PROP_ALLOWED:
                         if not all(ord(z) in Parser.PROP_RANGE for z in name):
                             raise ParserException(self, ln,
                                                   'Invalid property name')
+                    elif tilde:
+                        raise ParserException(self, ln,
+                                              'Canvas property cannot be tilded')
                     if len(x) == 1:
                         raise ParserException(self, ln, 'Syntax error')
                     value = x[1].strip()
                     if name == 'id':
+                        if tilde:
+                            raise ParserException(self, ln,
+                                                  'id property cannot be tilded')
                         if len(value) <= 0:
                             raise ParserException(self, ln, 'Empty id')
                         if value in ('self', 'root'):
@@ -1409,8 +1427,11 @@ class Parser(object):
                                 'Invalid id, cannot be "self" or "root"')
                         current_object.id = value
                     elif len(value):
-                        rule = ParserRuleProperty(self, ln, name, value)
+                        rule = ParserRuleProperty(self, ln, name, value, prio)
                         if name[:3] == 'on_':
+                            if tilde:
+                                raise ParserException(self, ln,
+                                                      'Handler property cannot be tilded')
                             current_object.handlers.append(rule)
                         else:
                             current_object.properties[name] = rule
@@ -1506,17 +1527,20 @@ def undo_bindings(bound):
             pass
 
 
-def undo_bindings_list(bounds):
-    if bounds:
-        for bound in bounds:
-            undo_bindings(bound)
-
-
-def clear_constraint(widget, key):
-    bindings = _constraints[widget.uid][key]
+def clear_constraints(widget, key, prio):
+    _for_wid = _constraints[widget.uid]
+    bindings = _for_wid[key]
     if bindings:
-        undo_bindings_list(bindings)
-        del bindings[:]
+        _bindings = []
+        for _binding in bindings:
+            _prio, _bounds = _binding
+            if _prio is None or _prio < prio:
+                if _bounds:
+                    for _bound in _bounds:
+                        undo_bindings(_bound)
+            else:
+                _bindings.append(_binding)
+        _for_wid[key] = bindings = _bindings
     return bindings
 
 
@@ -1611,11 +1635,12 @@ def create_handler(iself, element, key, value, rule, idmap, delayed=False):
     idmap['self'] = iself.proxy_ref
     handler_append = _handlers[iself.uid].append
 
-    # if there is already a constraint on iself/key then remove it before
-    # posting a new one.  there should be at most one constraint for any
-    # property iself/key.
+    # if there is already at least one constraint on iself/key then remove
+    # all constraints that have no or lesser priority than this property
+    # rule's priority. however, if the current property rule has priority
+    # None, then leave current constraints unchanged.
     if not delayed:
-        current_constraint_bindings = clear_constraint(iself, key)
+        current_constraint_bindings = clear_constraints(iself, key, rule.prio)
 
     # we need a hash for when delayed, so we don't execute duplicate canvas
     # callbacks from the same handler during a sync op
@@ -1674,7 +1699,7 @@ def create_handler(iself, element, key, value, rule, idmap, delayed=False):
             if was_bound:
                 handler_append(bound)
             if bound and not delayed:
-                current_constraint_bindings.append(bound)
+                current_constraint_bindings.append((rule.prio, bound))
 
     try:
         return eval(value, idmap)
@@ -2041,7 +2066,7 @@ class BuilderBase(object):
                         value = create_handler(widget_set, widget_set, key,
                                                value, rule, rctx['ids'])
                     else:
-                        clear_constraint(widget_set, key)
+                        clear_constraint(widget_set, key, rule.prio)
                     setattr(widget_set, key, value)
         except Exception as e:
             if rule is not None:
